@@ -75,10 +75,12 @@ retain = cf.get('mqtt_retain', False)
 
 topic_prefix = cf.get('mqtt_topic_prefix', 'broadlink/')
 
-
 # noinspection PyUnusedLocal
 def on_message(client, device, msg):
-    command = msg.topic[len(topic_prefix):]
+    if msg.topic[-3:]!='/on':
+        return
+
+    command = msg.topic[len(topic_prefix):-3]
 
     if isinstance(device, dict):
         for subprefix in device:
@@ -95,7 +97,6 @@ def on_message(client, device, msg):
     if command == 'temperature' or \
             command == 'energy' or \
             command == 'sensors' or \
-            command == 'position' or \
             command == 'state' or \
             command.startswith('state/') or \
             command.startswith('sensor/'):
@@ -172,8 +173,29 @@ def on_message(client, device, msg):
                 else:
                     logging.warning("Unrecognized curtain action " + action)
                 return
+        if device.type == 'Wistar curtain':
+            if command == 'open':
+                logging.debug("Opening curtain")
+                device.open()
+                device.publish(100)
+            elif command == 'close':
+                logging.debug("Closing curtain")
+                device.close()
+                device.publish(0)
+            elif command == 'stop':
+                logging.debug("Stopping curtain")
+                device.stop()
+                device.publish(device.get_percentage())
+            elif command == 'position':
+                percentage = int(action)
+                logging.debug("Setting curtain position to {0}".format(percentage))
+                device.set_percentage_and_wait(percentage)
+                device.publish(device.get_percentage())
+            else:
+                logging.warning("Unrecognized curtain command: "+command+ " action: " + action)
+            return
 
-        if command == 'set' and device.type == 'Dooya DT360E':
+        if command == 'position' and device.type == 'Wistar curtain':
             percentage = int(action)
             logging.debug("Setting curtain position to {0}".format(percentage))
             device.set_percentage_and_wait(percentage)
@@ -215,7 +237,7 @@ def on_message(client, device, msg):
 
 # noinspection PyUnusedLocal
 def on_connect(client, device, flags, result_code):
-    topic = topic_prefix + '#'
+    topic = topic_prefix + '+/on'
     logging.debug("Connected to MQTT broker, subscribing to topic " + topic)
     mqttc.subscribe(topic, qos)
 
@@ -379,6 +401,8 @@ def get_device(cf):
             device = broadlink.mp1(host=host, mac=mac, devtype=0x4EB5)
         elif device_type == 'dooya':
             device = broadlink.dooya(host=host, mac=mac, devtype=0x4E4D)
+        elif device_type == 'wistar':
+            device = broadlink.wistar(host=host, mac=mac, devtype=0x4f6c)
         elif device_type == 'bg1':
             device = broadlink.bg1(host=host, mac=mac, devtype=0x51E3)
         else:
@@ -450,6 +474,29 @@ def configure_device(device, mqtt_prefix):
             scheduler = sched.scheduler(time.time, time.sleep)
             scheduler.enter(broadlink_dooya_position_interval, 1, broadlink_dooya_position_timer,
                             [scheduler, broadlink_dooya_position_interval, device])
+            # scheduler.run()
+            tt = SchedulerThread(scheduler)
+            tt.daemon = True
+            tt.start()
+
+    if device.type == 'Wistar curtain':
+        # noinspection PyUnusedLocal
+        def publish(dev, percentage):
+            try:
+                percentage = str(percentage)
+                topic = mqtt_prefix + "position"
+                logging.debug("Sending Wistar position " + percentage + " to topic " + topic)
+                mqttc.publish(topic, percentage, qos=qos, retain=retain)
+            except:
+                logging.exception("Error")
+
+        device.publish = types.MethodType(publish, device)
+
+        broadlink_wistar_position_interval = cf.get('broadlink_wistar_position_interval', 0)
+        if broadlink_wistar_position_interval > 0:
+            scheduler = sched.scheduler(time.time, time.sleep)
+            scheduler.enter(broadlink_wistar_position_interval, 1, broadlink_wistar_position_timer,
+                            [scheduler, broadlink_wistar_position_interval, device])
             # scheduler.run()
             tt = SchedulerThread(scheduler)
             tt.daemon = True
@@ -537,6 +584,10 @@ def broadlink_mp1_state_timer(scheduler, delay, device, mqtt_prefix):
 
 def broadlink_dooya_position_timer(scheduler, delay, device):
     scheduler.enter(delay, 1, broadlink_dooya_position_timer, [scheduler, delay, device])
+    device.publish(device.get_percentage())
+
+def broadlink_wistar_position_timer(scheduler, delay, device):
+    scheduler.enter(delay, 1, broadlink_wistar_position_timer, [scheduler, delay, device])
     device.publish(device.get_percentage())
 
 
